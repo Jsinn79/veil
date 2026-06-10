@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { authenticate } from '../middleware/auth.middleware.js';
-import { createCheckoutSession, handleStripeWebhook } from '../services/subscription.service.js';
+import { createCheckoutSession } from '../services/subscription.service.js';
 import { query } from '../config/database.js';
 
 const router = Router();
@@ -34,20 +34,6 @@ router.post('/checkout', authenticate, async (req: Request, res: Response, next:
       return res.status(400).json({ error: { code: 'INVALID_TIER', message: 'Tier must be "basic" or "pro"' } });
     }
     const result = await createCheckoutSession(req.user!.sub, tier);
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Stripe webhook (raw body needed — configured in app.ts)
-router.post('/webhooks/stripe', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const signature = req.headers['stripe-signature'] as string;
-    const result = await handleStripeWebhook(
-      JSON.stringify(req.body),
-      signature,
-    );
     res.json(result);
   } catch (err) {
     next(err);

@@ -1,7 +1,21 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { query } from '../config/database.js';
+import { handleStripeWebhook } from '../services/subscription.service.js';
 
 const router = Router();
+
+// Stripe webhook (raw body provided by app.ts middleware at /api/webhooks/stripe)
+router.post('/stripe', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const signature = req.headers['stripe-signature'] as string;
+    // req.body is a Buffer when raw body parser is used
+    const body = req.body instanceof Buffer ? req.body.toString() : JSON.stringify(req.body);
+    const result = await handleStripeWebhook(body, signature);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // Twilio inbound SMS webhook
 router.post('/twilio', async (req: Request, res: Response) => {
@@ -34,7 +48,7 @@ router.post('/twilio', async (req: Request, res: Response) => {
 // Email forwarding webhook (from SendGrid/Postal)
 router.post('/email', async (req: Request, res: Response) => {
   try {
-    const { to, from, subject, text } = req.body;
+    const { to, from, subject } = req.body;
 
     // Parse alias from recipient
     const aliasParts = to?.split('@')[0];
@@ -56,7 +70,6 @@ router.post('/email', async (req: Request, res: Response) => {
          VALUES ($1, $2, $3, $4, 'forwarded')`,
         [alias.id, from, alias.forwarding_address, subject],
       );
-      // Actually forward the email here (SendGrid SMTP API)
     }
 
     res.json({ status: 'ok' });

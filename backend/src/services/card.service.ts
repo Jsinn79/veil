@@ -106,7 +106,7 @@ export async function updateCard(
   const stripe = getStripe();
   if (updates.status) {
     await stripe.issuing.cards.update(existing.stripe_card_id, {
-      status: updates.status === 'frozen' ? 'frozen' : 'active',
+      status: updates.status as any,
     });
   }
 

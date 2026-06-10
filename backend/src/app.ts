@@ -18,7 +18,7 @@ import webhooksRoutes from './routes/webhooks.routes.js';
 export function createApp() {
   const app = express();
 
-  // Middleware
+  // Global middleware
   app.use(helmet());
   app.use(cors({
     origin: config.frontendUrl,
@@ -27,7 +27,8 @@ export function createApp() {
   app.use(morgan('dev'));
   app.use(cookieParser());
 
-  // Stripe webhook needs raw body — handle before JSON parser
+  // ⚠️ Stripe webhook needs raw body — apply BEFORE the JSON body parser
+  // The raw body is only needed for signature verification on /api/webhooks/stripe
   app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 
   // Standard JSON parsing for all other routes

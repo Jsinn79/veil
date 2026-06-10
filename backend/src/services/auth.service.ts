@@ -1,9 +1,116 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { config } from '../config/index.js';
 import { query } from '../config/database.js';
-import { AppError, ConflictError, UnauthorizedError } from '../utils/errors.js';
+import { AppError, ConflictError, NotFoundError, UnauthorizedError } from '../utils/errors.js';
 import type { JwtPayload, PlanTier, AuthResponse, UserRow, SubscriptionRow } from '../types/index.js';
+
+/**
+ * Generate an email verification token and store it.
+ */
+export async function sendVerificationEmail(userId: string): Promise<{ token: string }> {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+  await query(
+    `UPDATE users SET email_verified_at = NULL WHERE id = $1`,
+    [userId],
+  );
+
+  // Store token — we use a simple approach: store in a verification_tokens table
+  // For simplicity, embed in JWT
+  const verificationToken = jwt.sign(
+    { sub: userId, purpose: 'email-verify' },
+    config.jwtSecret,
+    { expiresIn: '24h' },
+  );
+
+  // In production, send email via SendGrid/Resend here
+  console.log(`[EMAIL VERIFICATION] User ${userId}: token=${verificationToken}`);
+
+  return { token: verificationToken };
+}
+
+/**
+ * Verify email using the verification token.
+ */
+export async function verifyEmail(token: string): Promise<void> {
+  try {
+    const payload = jwt.verify(token, config.jwtSecret) as { sub: string; purpose: string };
+    if (payload.purpose !== 'email-verify') {
+      throw new AppError(400, 'INVALID_TOKEN', 'Invalid verification token');
+    }
+
+    const results = await query(
+      `UPDATE users SET email_verified_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND email_verified_at IS NULL
+       RETURNING id`,
+      [payload.sub],
+    );
+
+    if ((results as any[]).length === 0) {
+      throw new AppError(400, 'ALREADY_VERIFIED', 'Email is already verified or user not found');
+    }
+  } catch (err: any) {
+    if (err instanceof AppError) throw err;
+    if (err.name === 'TokenExpiredError') {
+      throw new AppError(400, 'TOKEN_EXPIRED', 'Verification link has expired. Request a new one.');
+    }
+    throw new AppError(400, 'INVALID_TOKEN', 'Invalid verification token');
+  }
+}
+
+/**
+ * Initiate password reset — generate reset token.
+ */
+export async function forgotPassword(email: string): Promise<{ message: string }> {
+  const users = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+  const user = (users as any[])[0];
+
+  // Always return success to prevent email enumeration
+  if (!user) {
+    return { message: 'If an account with that email exists, a reset link has been sent.' };
+  }
+
+  const resetToken = jwt.sign(
+    { sub: user.id, purpose: 'password-reset' },
+    config.jwtSecret,
+    { expiresIn: '1h' },
+  );
+
+  // In production, send email via SendGrid/Resend here
+  console.log(`[PASSWORD RESET] User ${user.id}: token=${resetToken}`);
+
+  return { message: 'If an account with that email exists, a reset link has been sent.' };
+}
+
+/**
+ * Reset password using a valid reset token.
+ */
+export async function resetPassword(token: string, newPassword: string): Promise<void> {
+  try {
+    const payload = jwt.verify(token, config.jwtSecret) as { sub: string; purpose: string };
+    if (payload.purpose !== 'password-reset') {
+      throw new AppError(400, 'INVALID_TOKEN', 'Invalid reset token');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, config.bcryptRounds);
+
+    await query(
+      `UPDATE users SET password_hash = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id`,
+      [passwordHash, payload.sub],
+    );
+  } catch (err: any) {
+    if (err instanceof AppError) throw err;
+    if (err.name === 'TokenExpiredError') {
+      throw new AppError(400, 'TOKEN_EXPIRED', 'Reset link has expired. Request a new one.');
+    }
+    throw new AppError(400, 'INVALID_TOKEN', 'Invalid reset token');
+  }
+}
 
 export async function signup(email: string, password: string, displayName?: string): Promise<AuthResponse> {
   // Check existing user
@@ -39,6 +146,9 @@ export async function signup(email: string, password: string, displayName?: stri
      VALUES ($1, $2, $3)`,
     [user.id, periodStart, periodEnd],
   );
+
+  // Auto-send verification email
+  await sendVerificationEmail(user.id);
 
   return generateAuthResponse(user, 'free');
 }
@@ -88,7 +198,7 @@ function generateAuthResponse(user: UserRow, planTier: string): AuthResponse {
   };
 }
 
-export function refreshAccessToken(refreshToken: string): AuthResponse['access_token'] {
+export function refreshAccessToken(refreshToken: string): string {
   try {
     const payload = jwt.verify(refreshToken, config.jwtRefreshSecret) as JwtPayload;
     const { sub, email, tier } = payload;
@@ -96,4 +206,46 @@ export function refreshAccessToken(refreshToken: string): AuthResponse['access_t
   } catch {
     throw new UnauthorizedError('Invalid or expired refresh token');
   }
+}
+
+export async function getProfile(userId: string) {
+  const results = await query(
+    `SELECT u.id, u.email, u.display_name, u.email_verified_at, u.created_at,
+            s.plan_tier, s.status as subscription_status
+     FROM users u
+     LEFT JOIN subscriptions s ON s.user_id = u.id AND s.status = 'active'
+     WHERE u.id = $1`,
+    [userId],
+  );
+  const user = (results as any[])[0];
+  if (!user) throw new NotFoundError('User');
+  return user;
+}
+
+export async function updateProfile(userId: string, updates: { display_name?: string; email?: string }) {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (updates.display_name !== undefined) {
+    fields.push(`display_name = $${idx++}`);
+    values.push(updates.display_name);
+  }
+  if (updates.email !== undefined) {
+    fields.push(`email = $${idx++}`);
+    values.push(updates.email.toLowerCase());
+  }
+
+  if (fields.length === 0) {
+    return { message: 'No changes' };
+  }
+
+  fields.push('updated_at = NOW()');
+  values.push(userId);
+
+  const results = await query(
+    `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, email, display_name`,
+    values,
+  );
+  return { user: (results as any[])[0] };
 }

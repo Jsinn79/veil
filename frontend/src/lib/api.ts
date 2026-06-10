@@ -1,42 +1,29 @@
-import axios from 'axios';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api";
 
-const api = axios.create({
-  baseURL: '/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+export async function fetcher<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("veil_token") : null;
+  
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    ...options.headers,
+  });
 
-// Attach auth token
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token');
   if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+    headers.set("Authorization", `Bearer ${token}`);
   }
-  return config;
-});
 
-// Handle 401 — try refresh
-api.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    const originalRequest = error.config;
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
-      try {
-        const refreshToken = localStorage.getItem('refresh_token');
-        const { data } = await axios.post('/api/auth/refresh', { refresh_token: refreshToken });
-        localStorage.setItem('access_token', data.access_token);
-        originalRequest.headers.Authorization = `Bearer ${data.access_token}`;
-        return api(originalRequest);
-      } catch {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
-        window.location.href = '/login';
-      }
-    }
-    return Promise.reject(error);
-  },
-);
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    ...options,
+    headers,
+  });
 
-export default api;
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: "An error occurred" }));
+    throw new Error(error.message || "An error occurred");
+  }
+
+  return response.json();
+}
